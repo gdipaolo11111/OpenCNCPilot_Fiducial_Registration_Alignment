@@ -259,7 +259,7 @@
                     </Expander>
                 </Border>
 				<Border Style="{StaticResource stylePanelOut}">
-                    <Expander Header="Camera Alignment" IsExpanded="False" Collapsed="ExpanderCamera_Collapsed">
+                    <Expander Name="ExpanderCamera" Header="Camera Alignment" IsExpanded="False" Expanded="ExpanderCamera_Expanded" Collapsed="ExpanderCamera_Collapsed">
 				        <StackPanel>
 				            <Grid Width="500" Height="500" Background="Black" Margin="0,5,0,5">
 				                <Image Name="CameraImage" Stretch="Uniform"/>
@@ -291,6 +291,7 @@
 				                <StackPanel>
 				                    <Button Name="ButtonSetP1" Content="Set Point 1 (Current Pos)" Style="{StaticResource styleButton}" Click="ButtonSetP1_Click" Margin="5"/>
 				                    <Button Name="ButtonSetP2" Content="Set Point 2 (Current Pos)" Style="{StaticResource styleButton}" Click="ButtonSetP2_Click" Margin="5"/>
+				                    <CheckBox Name="CheckBoxAlignmentScale" Content="Also correct scale" Margin="5" ToolTip="Stretch or shrink the G-Code so the distance between both points matches the measured one"/>
 				                    <Button Name="ButtonApplyAlignment" Content="Apply Alignment" Style="{StaticResource styleButton}" Click="ButtonApplyAlignment_Click" Margin="5" FontWeight="Bold"/>
 				                </StackPanel>
 				            </GroupBox>

@@ -14,9 +14,14 @@ This modified version of OpenCNCPilot includes support for visual alignment usin
     * **Scaling** (optional, if there are slight deformations).
 
 #### User Guide:
-1. **Calibrate Offset:** Make a mark with the tool, zero the coordinates, then move the camera until the crosshair is over the mark. Save the offset.
-2. **Mark Points:** Locate two known points on your part using the camera. For each one, enter the theoretical coordinate from your G-Code file.
-3. **Apply:** The software will recalculate the toolpath so it matches the real position on your machine.
+1. **Calibrate Offset:** Make a mark with the tool, zero the coordinates, then move the camera until the crosshair is over the mark. Save the offset. It is remembered, so you only need to repeat this if the camera is moved.
+2. **Mark Points:** Set your work zero, then locate two known points on your part using the camera, as far apart as possible. For each one, enter the theoretical coordinate from your G-Code file.
+3. **Apply:** Open the G-Code file and click "Apply Alignment". The software will rotate and move the toolpath so it matches the real position on your machine. Tick "Also correct scale" only if the part may be deformed.
+
+Notes:
+* Don't change the X/Y work zero after marking the points, the aligned G-Code depends on it.
+* If you use a height map, align first and apply the height map afterwards.
+* The points are kept: to align another file of the same part (eg. drilling), open it and click "Apply Alignment" again.
 
 ![Screenshot](img/Screenshot_camera.png)
 

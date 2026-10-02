@@ -483,5 +483,87 @@ namespace OpenCNCPilot.GCode
 
 			return new GCodeFile(newFile);
 		}
+
+		/// <summary>
+		/// Moves, rotates and scales the toolpath in the XY plane so that the point 'origin' lands on 'target':
+		/// p' = target + scale * R(angle) * (p - origin). Z is not modified.
+		/// </summary>
+		/// <param name="angle">counter-clockwise rotation in radians</param>
+		public GCodeFile TransformXY(Vector2 origin, Vector2 target, double angle, double scale)
+		{
+			double cos = scale * Math.Cos(angle);
+			double sin = scale * Math.Sin(angle);
+
+			Func<Vector3, Vector3> transform = p =>
+			{
+				double dx = p.X - origin.X;
+				double dy = p.Y - origin.Y;
+				p.X = target.X + cos * dx - sin * dy;
+				p.Y = target.Y + sin * dx + cos * dy;
+				return p;
+			};
+
+			List<Command> newFile = new List<Command>();
+
+			// the XY position is unknown until the file has specified both X and Y,
+			// unknown coordinates are never written to the output, so they are left as they are
+			bool xyValid = false;
+
+			foreach (Command oldCommand in Toolpath)
+			{
+				if (oldCommand is Arc)
+				{
+					Arc oldArc = (Arc)oldCommand;
+
+					// rotating the XY plane would tilt these arcs out of their plane
+					if (oldArc.Plane != ArcPlane.XY)
+						throw new Exception("GCode contains arcs in YZ or XZ plane (G18/19), can't align gcode. Use 'Arcs to Lines' if you really need this.");
+
+					Arc newArc = new Arc();
+					newArc.Direction = oldArc.Direction;
+					newArc.Plane = oldArc.Plane;
+					newArc.Feed = oldArc.Feed;
+					newArc.LineNumber = oldArc.LineNumber;
+					newArc.Start = transform(oldArc.Start);
+					newArc.End = transform(oldArc.End);
+
+					Vector3 center = transform(new Vector3(oldArc.U, oldArc.V, 0));
+					newArc.U = center.X;
+					newArc.V = center.Y;
+
+					newFile.Add(newArc);
+
+					xyValid = true;     // the parser only allows arcs after an absolute position has been established
+				}
+				else if (oldCommand is Line)
+				{
+					Line oldLine = (Line)oldCommand;
+
+					// eg. "G0 X5" before Y is known: the rotated X would depend on the unknown Y
+					if (oldLine.PositionValid[0] != oldLine.PositionValid[1])
+						throw new Exception($"Line {oldLine.LineNumber} moves along X or Y before both X and Y are known, can't align gcode. The first XY move has to specify both X and Y.");
+
+					Line newLine = new Line();
+					newLine.Rapid = oldLine.Rapid;
+					oldLine.PositionValid.CopyTo(newLine.PositionValid, 0);
+					newLine.StartValid = oldLine.StartValid;
+					newLine.Feed = oldLine.Feed;
+					newLine.LineNumber = oldLine.LineNumber;
+					newLine.Start = xyValid ? transform(oldLine.Start) : oldLine.Start;
+
+					xyValid = oldLine.PositionValid[0];
+
+					newLine.End = xyValid ? transform(oldLine.End) : oldLine.End;
+
+					newFile.Add(newLine);
+				}
+				else
+				{
+					newFile.Add(oldCommand);
+				}
+			}
+
+			return new GCodeFile(newFile);
+		}
 	}
 }

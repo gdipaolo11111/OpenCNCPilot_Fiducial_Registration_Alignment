@@ -26,8 +26,9 @@ namespace OpenCNCPilot
         private double cameraOffsetX = Properties.Settings.Default.CameraOffsetX;
         private double cameraOffsetY = Properties.Settings.Default.CameraOffsetY;
 
-        private double p1MachineX = 0, p1MachineY = 0, p1GCodeX = 0, p1GCodeY = 0;
-        private double p2MachineX = 0, p2MachineY = 0, p2GCodeX = 0, p2GCodeY = 0;
+        // Posición real (coordenadas de trabajo, las mismas en las que se ejecuta el G-Code) y posición en el G-Code de cada punto
+        private Vector2 p1Work, p1GCode;
+        private Vector2 p2Work, p2GCode;
         private bool isP1Set = false;
         private bool isP2Set = false;
         // ===============================================
@@ -49,6 +50,7 @@ namespace OpenCNCPilot
         HeightMap Map { get; set; }
 
         bool HeightMapApplied { get; set; } = false;
+        bool AlignmentApplied { get; set; } = false;
 
         GrblSettingsWindow settingsWindow = new GrblSettingsWindow();
 
@@ -252,6 +254,8 @@ namespace OpenCNCPilot
                         try
                         {
                             machine.SetFile(System.IO.File.ReadAllLines(file));
+                            HeightMapApplied = false;
+                            AlignmentApplied = false;
                         }
                         catch (Exception ex)
                         {
@@ -481,31 +485,48 @@ namespace OpenCNCPilot
         // Función de seguridad para apagar la cámara correctamente
         private void StopCamera()
         {
-            if (videoSource != null && videoSource.IsRunning)
+            if (videoSource == null)
+                return;
+
+            if (videoSource.IsRunning)
             {
                 // Le decimos a la cámara que pare
                 videoSource.SignalToStop();
                 // Esperamos a que se detenga físicamente (apaga el LED)
                 videoSource.WaitForStop();
-                // Desconectamos el evento de los frames
-                videoSource.NewFrame -= new AForge.Video.NewFrameEventHandler(video_NewFrame);
-                videoSource = null;
+            }
+            // Desconectamos el evento de los frames
+            videoSource.NewFrame -= new AForge.Video.NewFrameEventHandler(video_NewFrame);
+            videoSource = null;
+            // Para que no se quede a la vista el último fotograma congelado
+            CameraImage.Source = null;
+        }
+
+        // Enciende la cámara elegida en el ComboBox, solo si el panel está abierto
+        private void StartCamera()
+        {
+            // 1. APAGAMOS LA CÁMARA ANTERIOR (si la hay)
+            StopCamera();
+
+            // 2. ENCENDEMOS LA NUEVA
+            if (ExpanderCamera.IsExpanded && ComboBoxCameras.SelectedIndex >= 0 && videoDevices != null && videoDevices.Count > 0)
+            {
+                videoSource = new VideoCaptureDevice(videoDevices[ComboBoxCameras.SelectedIndex].MonikerString);
+                videoSource.NewFrame += new NewFrameEventHandler(video_NewFrame);
+                videoSource.Start();
             }
         }
 
         // Evento al cambiar la cámara en el ComboBox
         private void ComboBoxCameras_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            // 1. APAGAMOS LA CÁMARA ANTERIOR (si la hay)
-            StopCamera();
+            StartCamera();
+        }
 
-            // 2. ENCENDEMOS LA NUEVA
-            if (ComboBoxCameras.SelectedIndex >= 0 && videoDevices != null && videoDevices.Count > 0)
-            {
-                videoSource = new VideoCaptureDevice(videoDevices[ComboBoxCameras.SelectedIndex].MonikerString);
-                videoSource.NewFrame += new NewFrameEventHandler(video_NewFrame);
-                videoSource.Start();
-            }
+        // Encender la cámara al abrir (expandir) el panel
+        private void ExpanderCamera_Expanded(object sender, RoutedEventArgs e)
+        {
+            StartCamera();
         }
 
         // Apagar la cámara al cerrar (colapsar) el panel
@@ -520,62 +541,79 @@ namespace OpenCNCPilot
         {
             try
             {
-                Bitmap bitmap = (Bitmap)eventArgs.Frame.Clone();
-
-                // --- INICIO NUEVO: Rotar y Espejar ---
-                RotateFlipType transform = RotateFlipType.RotateNoneFlipNone;
-
-                if (!cameraMirrored)
+                // using: cada fotograma copiado se libera al terminar (si no, se acumula memoria a 30 fps)
+                using (Bitmap bitmap = (Bitmap)eventArgs.Frame.Clone())
                 {
-                    if (cameraRotation == 90) transform = RotateFlipType.Rotate90FlipNone;
-                    else if (cameraRotation == 180) transform = RotateFlipType.Rotate180FlipNone;
-                    else if (cameraRotation == 270) transform = RotateFlipType.Rotate270FlipNone;
-                }
-                else
-                {
-                    if (cameraRotation == 0) transform = RotateFlipType.RotateNoneFlipX;
-                    else if (cameraRotation == 90) transform = RotateFlipType.Rotate90FlipX;
-                    else if (cameraRotation == 180) transform = RotateFlipType.Rotate180FlipX;
-                    else if (cameraRotation == 270) transform = RotateFlipType.Rotate270FlipX;
-                }
+                    // --- INICIO NUEVO: Rotar y Espejar ---
+                    RotateFlipType transform = RotateFlipType.RotateNoneFlipNone;
 
-                // Aplicamos la transformación a los píxeles si es necesario
-                if (transform != RotateFlipType.RotateNoneFlipNone)
-                {
-                    bitmap.RotateFlip(transform);
-                }
-                // --- FIN NUEVO ---
-
-                // Convertir la imagen de la cámara a un formato que WPF pueda mostrar
-                using (MemoryStream memory = new MemoryStream())
-                {
-                    bitmap.Save(memory, System.Drawing.Imaging.ImageFormat.Bmp);
-                    memory.Position = 0;
-                    BitmapImage bitmapImage = new BitmapImage();
-                    bitmapImage.BeginInit();
-                    bitmapImage.StreamSource = memory;
-                    bitmapImage.CacheOption = BitmapCacheOption.OnLoad;
-                    bitmapImage.EndInit();
-                    bitmapImage.Freeze(); // Muy importante
-
-                    Dispatcher.BeginInvoke(new System.Action(delegate
+                    if (!cameraMirrored)
                     {
-                        CameraImage.Source = bitmapImage;
-                    }));
+                        if (cameraRotation == 90) transform = RotateFlipType.Rotate90FlipNone;
+                        else if (cameraRotation == 180) transform = RotateFlipType.Rotate180FlipNone;
+                        else if (cameraRotation == 270) transform = RotateFlipType.Rotate270FlipNone;
+                    }
+                    else
+                    {
+                        if (cameraRotation == 0) transform = RotateFlipType.RotateNoneFlipX;
+                        else if (cameraRotation == 90) transform = RotateFlipType.Rotate90FlipX;
+                        else if (cameraRotation == 180) transform = RotateFlipType.Rotate180FlipX;
+                        else if (cameraRotation == 270) transform = RotateFlipType.Rotate270FlipX;
+                    }
+
+                    // Aplicamos la transformación a los píxeles si es necesario
+                    if (transform != RotateFlipType.RotateNoneFlipNone)
+                    {
+                        bitmap.RotateFlip(transform);
+                    }
+                    // --- FIN NUEVO ---
+
+                    // Convertir la imagen de la cámara a un formato que WPF pueda mostrar
+                    using (MemoryStream memory = new MemoryStream())
+                    {
+                        bitmap.Save(memory, System.Drawing.Imaging.ImageFormat.Bmp);
+                        memory.Position = 0;
+                        BitmapImage bitmapImage = new BitmapImage();
+                        bitmapImage.BeginInit();
+                        bitmapImage.StreamSource = memory;
+                        bitmapImage.CacheOption = BitmapCacheOption.OnLoad;
+                        bitmapImage.EndInit();
+                        bitmapImage.Freeze(); // Muy importante
+
+                        Dispatcher.BeginInvoke(new System.Action(delegate
+                        {
+                            // Si mientras tanto se ha apagado o cambiado la cámara, este fotograma ya no vale
+                            if (sender == videoSource)
+                                CameraImage.Source = bitmapImage;
+                        }));
+                    }
                 }
             }
             catch { }
         }
 
+        // Para leer la posición, la máquina tiene que estar conectada y sin nada en marcha
+        private bool CheckMachineReady()
+        {
+            if (machine.Mode == Machine.OperatingMode.Manual)
+                return true;
+
+            MessageBox.Show("The machine has to be connected and idle (no file, probing or macro running).");
+            return false;
+        }
+
         private void ButtonSetOffset_Click(object sender, RoutedEventArgs e)
         {
+            if (!CheckMachineReady())
+                return;
+
             MessageBoxResult result = MessageBox.Show(
-                "Instrucciones para calibrar:\n\n" +
-                "1. Haz una pequeña marca en el material con la fresa/broca.\n" +
-                "2. Pon los ejes X e Y a cero (botón 'Zero (G10)' o 'Zero (G92)').\n" +
-                "3. Mueve la máquina hasta que la cruz roja de la cámara esté exactamente sobre la marca.\n\n" +
-                "¿Has hecho esto y quieres guardar el offset?",
-                "Calibrar Offset de Cámara", MessageBoxButton.YesNo, MessageBoxImage.Information);
+                "How to calibrate:\n\n" +
+                "1. Make a small mark on the material with the tool.\n" +
+                "2. Zero the X and Y axes on the mark ('Zero (G10)' or 'Zero (G92)' button).\n" +
+                "3. Jog the machine until the red crosshair of the camera is exactly over the mark.\n\n" +
+                "Done? Save the current position as the camera offset?",
+                "Calibrate Camera Offset", MessageBoxButton.YesNo, MessageBoxImage.Information);
 
             if (result == MessageBoxResult.Yes)
             {
@@ -583,111 +621,182 @@ namespace OpenCNCPilot
                 cameraOffsetX = machine.WorkPosition.X;
                 cameraOffsetY = machine.WorkPosition.Y;
 
-                MessageBox.Show($"Offset guardado correctamente:\nX = {cameraOffsetX:F3} mm\nY = {cameraOffsetY:F3} mm");
+                // Se guarda en la configuración para no tener que calibrar cada vez que se abre el programa
+                Properties.Settings.Default.CameraOffsetX = cameraOffsetX;
+                Properties.Settings.Default.CameraOffsetY = cameraOffsetY;
+                Properties.Settings.Default.Save();
+
+                MessageBox.Show($"Offset saved:\nX = {cameraOffsetX:F3} mm\nY = {cameraOffsetY:F3} mm");
             }
+        }
+
+        // Posición real (coordenadas de trabajo) del punto que está bajo la cruz de la cámara:
+        // la del husillo menos el offset de la cámara
+        private Vector2 PointUnderCamera()
+        {
+            return new Vector2(machine.WorkPosition.X - cameraOffsetX, machine.WorkPosition.Y - cameraOffsetY);
+        }
+
+        // Pide las coordenadas que tiene el punto en el G-Code. Devuelve false si el usuario cancela
+        private bool AskGCodePoint(string pointName, Vector2 defaultValue, out Vector2 point)
+        {
+            point = defaultValue;
+
+            EnterNumberWindow enwX = new EnterNumberWindow(defaultValue.X);
+            enwX.Title = $"{pointName}: Theoretical X coordinate (G-Code)";
+            enwX.Owner = this;
+            enwX.ShowDialog();
+            if (!enwX.Ok)
+                return false;
+
+            EnterNumberWindow enwY = new EnterNumberWindow(defaultValue.Y);
+            enwY.Title = $"{pointName}: Theoretical Y coordinate (G-Code)";
+            enwY.Owner = this;
+            enwY.ShowDialog();
+            if (!enwY.Ok)
+                return false;
+
+            point = new Vector2(enwX.Value, enwY.Value);
+            return true;
         }
 
         private void ButtonSetP1_Click(object sender, RoutedEventArgs e)
         {
+            if (!CheckMachineReady())
+                return;
+
             if (cameraOffsetX == 0 && cameraOffsetY == 0)
             {
-                MessageBox.Show("¡Cuidado! Aún no has configurado el Offset de la cámara.");
+                MessageBox.Show("Careful! The spindle-camera offset is not calibrated yet.");
                 return;
             }
 
-            // Calculamos la posición real del husillo usando la cámara y el offset
-            p1MachineX = machine.MachinePosition.X - cameraOffsetX;
-            p1MachineY = machine.MachinePosition.Y - cameraOffsetY;
+            // Calculamos la posición real del punto usando la cámara y el offset
+            // (antes de abrir los diálogos, por si la máquina se moviera)
+            Vector2 work = PointUnderCamera();
 
-            // Pedimos al usuario las coordenadas teóricas de este punto en su G-Code
-            OpenCNCPilot.EnterNumberWindow enwX = new OpenCNCPilot.EnterNumberWindow(0);
-            enwX.Title = "Punto 1: Coordenada X teórica (G-Code)";
-            enwX.ShowDialog();
-            if (!enwX.Ok) return; // CORREGIDO AQUÍ
-            p1GCodeX = enwX.Value; // CORREGIDO AQUÍ
+            // Pedimos al usuario las coordenadas teóricas de este punto en su G-Code.
+            // Si cancela, el punto anterior se queda como estaba
+            Vector2 gcode;
+            if (!AskGCodePoint("Point 1", p1GCode, out gcode))
+                return;
 
-            OpenCNCPilot.EnterNumberWindow enwY = new OpenCNCPilot.EnterNumberWindow(0);
-            enwY.Title = "Punto 1: Coordenada Y teórica (G-Code)";
-            enwY.ShowDialog();
-            if (!enwY.Ok) return; // CORREGIDO AQUÍ
-            p1GCodeY = enwY.Value; // CORREGIDO AQUÍ
-
+            p1Work = work;
+            p1GCode = gcode;
             isP1Set = true;
-            MessageBox.Show($"POINT 1 SAVED\n\nPosición Real Máquina: X={p1MachineX:F3}, Y={p1MachineY:F3}\nPosición G-Code: X={p1GCodeX:F3}, Y={p1GCodeY:F3}");
+            MessageBox.Show($"POINT 1 SAVED\n\nReal position (work coordinates): X={p1Work.X:F3}, Y={p1Work.Y:F3}\nG-Code position: X={p1GCode.X:F3}, Y={p1GCode.Y:F3}");
         }
 
         private void ButtonSetP2_Click(object sender, RoutedEventArgs e)
         {
+            if (!CheckMachineReady())
+                return;
+
             if (!isP1Set)
             {
                 MessageBox.Show("Please save Point 1 first.");
                 return;
             }
 
-            p2MachineX = machine.MachinePosition.X - cameraOffsetX;
-            p2MachineY = machine.MachinePosition.Y - cameraOffsetY;
+            Vector2 work = PointUnderCamera();
 
-            OpenCNCPilot.EnterNumberWindow enwX = new OpenCNCPilot.EnterNumberWindow(0);
-            enwX.Title = "Point 2: Theoretical X coordinate (G-Code)";
-            enwX.ShowDialog();
-            if (!enwX.Ok) return; // CORREGIDO AQUÍ
-            p2GCodeX = enwX.Value; // CORREGIDO AQUÍ
+            Vector2 gcode;
+            if (!AskGCodePoint("Point 2", p2GCode, out gcode))
+                return;
 
-            OpenCNCPilot.EnterNumberWindow enwY = new OpenCNCPilot.EnterNumberWindow(0);
-            enwY.Title = "Point 2: Theoretical Y coordinate (G-Code)";
-            enwY.ShowDialog();
-            if (!enwY.Ok) return; // CORREGIDO AQUÍ
-            p2GCodeY = enwY.Value; // CORREGIDO AQUÍ
-
+            p2Work = work;
+            p2GCode = gcode;
             isP2Set = true;
-            MessageBox.Show($"POINT 2 SAVED\n\nMachine Real Position: X={p2MachineX:F3}, Y={p2MachineY:F3}\nG-Code Position: X={p2GCodeX:F3}, Y={p2GCodeY:F3}");
+            MessageBox.Show($"POINT 2 SAVED\n\nReal position (work coordinates): X={p2Work.X:F3}, Y={p2Work.Y:F3}\nG-Code position: X={p2GCode.X:F3}, Y={p2GCode.Y:F3}");
         }
 
         private void ButtonApplyAlignment_Click(object sender, RoutedEventArgs e)
         {
+            if (machine.Mode == Machine.OperatingMode.SendFile)
+                return;
+
             if (!isP1Set || !isP2Set)
             {
                 MessageBox.Show("Points are missing. Make sure to set Point 1 and Point 2.");
                 return;
             }
 
-            // 1. Calcular las distancias entre puntos (Vectores)
-            double dxGCode = p2GCodeX - p1GCodeX;
-            double dyGCode = p2GCodeY - p1GCodeY;
+            if (!ToolPath.ContainsMotion)
+            {
+                MessageBox.Show("Open a G-Code file first.");
+                return;
+            }
 
-            double dxMachine = p2MachineX - p1MachineX;
-            double dyMachine = p2MachineY - p1MachineY;
+            // Los puntos son coordenadas del diseño original: aplicarlos a un G-Code ya alineado lo descolocaría
+            if (AlignmentApplied)
+            {
+                MessageBox.Show("The alignment was already applied to this file.\nOpen the G-Code file again if you want to align it again.");
+                return;
+            }
 
-            // 2. Calcular el ángulo de rotación (en radianes y grados)
-            // Usamos Atan2 porque nos da el ángulo exacto en el círculo completo de 360 grados
-            double angleGCode = Math.Atan2(dyGCode, dxGCode);
-            double angleMachine = Math.Atan2(dyMachine, dxMachine);
+            // El mapa de alturas corrige Z según la posición XY: si después se mueve el dibujo, cada corrección acaba en otro sitio
+            if (HeightMapApplied)
+            {
+                MessageBox.Show("The height map was already applied to this file and would end up in the wrong place.\nOpen the G-Code file again, align it first and apply the height map afterwards.");
+                return;
+            }
 
-            // La diferencia entre el ángulo real y el teórico es lo que tenemos que girar el archivo
-            double rotationAngle = angleMachine - angleGCode;
-            double rotationDegrees = rotationAngle * (180.0 / Math.PI);
+            // 1. Vectores de P1 a P2, en el G-Code y en la realidad
+            Vector2 deltaGCode = p2GCode - p1GCode;
+            Vector2 deltaWork = p2Work - p1Work;
 
-            // 3. Calcular la escala (porcentaje de deformación del material)
-            // Usamos el Teorema de Pitágoras (a² + b² = c²)
-            double distGCode = Math.Sqrt(dxGCode * dxGCode + dyGCode * dyGCode);
-            double distMachine = Math.Sqrt(dxMachine * dxMachine + dyMachine * dyMachine);
+            // Con los puntos muy juntos el ángulo no es fiable (y si coinciden, la escala dividiría entre cero)
+            if (deltaGCode.Magnitude < 1 || deltaWork.Magnitude < 1)
+            {
+                MessageBox.Show("Point 1 and Point 2 are too close together. Use two points as far apart as possible.");
+                return;
+            }
 
-            // Si scale es 1.0, el tamaño es exacto. Si es 1.01, la pieza real es 1% más grande.
-            double scale = distMachine / distGCode;
+            // 2. La diferencia entre el ángulo real y el teórico es lo que tenemos que girar el archivo
+            // (Atan2 da el ángulo en el círculo completo; se normaliza entre -180° y 180°)
+            double rotation = Math.Atan2(deltaWork.Y, deltaWork.X) - Math.Atan2(deltaGCode.Y, deltaGCode.X);
+            rotation = Math.Atan2(Math.Sin(rotation), Math.Cos(rotation));
 
-            // 4. Mostrar los cálculos para confirmar
+            // 3. Escala (deformación del material): si es 1.0, el tamaño es exacto. Si es 1.01, la pieza real es 1% más grande.
+            // Solo se corrige si se marca la casilla: con dos puntos medidos con la cámara, casi siempre es error de medida
+            double measuredScale = deltaWork.Magnitude / deltaGCode.Magnitude;
+            bool correctScale = CheckBoxAlignmentScale.IsChecked == true;
+            double scale = correctScale ? measuredScale : 1.0;
+
+            // 4. Se ancla en el punto medio entre P1 y P2: sin corregir la escala, la diferencia de distancia
+            // se reparte a partes iguales entre los dos puntos en vez de cargarla entera en P2
+            Vector2 centerGCode = (p1GCode + p2GCode) / 2;
+            Vector2 centerWork = (p1Work + p2Work) / 2;
+            Vector2 shift = centerWork - centerGCode;
+            double distanceError = deltaWork.Magnitude - deltaGCode.Magnitude;
+
+            string scaleInfo = correctScale
+                ? $"Scale factor: {scale:F4} (corrected)\n"
+                : $"Scale factor: not corrected (measured {measuredScale:F4}), each point may be off by {Math.Abs(distanceError) / 2:F3} mm\n";
+
+            // 5. Mostrar los cálculos para confirmar
             MessageBoxResult result = MessageBox.Show(
                 $"Alignment calculations:\n\n" +
-                $"Required rotation: {rotationDegrees:F3}° degrees\n" +
-                $"Scale factor: {scale:F4} (1.0 = perfect)\n\n" +
-                $"Do the data look correct? Do you want to apply this transformation to your G-code?",
+                $"Rotation: {rotation * 180.0 / Math.PI:F3}°\n" +
+                $"Shift: X {shift.X:F3} mm, Y {shift.Y:F3} mm\n" +
+                $"Distance P1-P2: {deltaGCode.Magnitude:F3} mm in the G-Code, {deltaWork.Magnitude:F3} mm measured\n" +
+                scaleInfo +
+                $"\nApply this transformation to the G-Code?\n" +
+                $"Don't change the X/Y work zero afterwards, the aligned G-Code depends on it.",
                 "Confirm Alignment", MessageBoxButton.YesNo, MessageBoxImage.Question);
 
-            if (result == MessageBoxResult.Yes)
+            if (result != MessageBoxResult.Yes)
+                return;
+
+            // 6. Girar, mover (y escalar) todas las coordenadas X/Y del G-Code
+            try
             {
-                // El siguiente paso será interceptar las líneas del G-Code y aplicar la trigonometría (Seno y Coseno)
-                // a cada coordenada X e Y, usando p1MachineX y p1MachineY como anclaje.
-                MessageBox.Show("Math successfully calculated. Next step: Inject rotation into the G-code.");
+                machine.SetFile(ToolPath.TransformXY(centerGCode, centerWork, rotation, scale).GetGCode());
+                AlignmentApplied = true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
             }
         }
 

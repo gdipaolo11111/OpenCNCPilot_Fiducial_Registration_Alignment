@@ -40,6 +40,7 @@ namespace OpenCNCPilot
 			}
 
 			HeightMapApplied = false;
+			AlignmentApplied = false;
 		}
 
 		private void SaveFileDialogGCode_FileOk(object sender, System.ComponentModel.CancelEventArgs e)
