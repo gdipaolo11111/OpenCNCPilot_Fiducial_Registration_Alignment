@@ -243,6 +243,55 @@ namespace OpenCNCPilot.Communication
 		Queue ToSendPriority = Queue.Synchronized(new Queue()); //contains characters (for soft reset, feed hold etc)
 		Queue ToSendMacro = Queue.Synchronized(new Queue());
 
+		#region Jogging
+		// Continuous jogging is streamed as short $J= increments for as long as the UI keeps
+		// calling JogKeepAlive() (dead-man). If the heartbeat stops (key released, focus lost,
+		// UI thread blocked) the worker thread cancels the jog by itself, so a lost KeyUp can
+		// no longer let the machine run to the end of an axis.
+		//
+		// Why not one long $J plus 0x85 on KeyUp (the old approach): GRBL ignores 0x85 unless
+		// it is already in the JOG state (serial.c). If the cancel arrives before GRBL has
+		// parsed the $J line (and 0x85 was sent through the priority queue, i.e. before the
+		// $J line itself), the cancel is dropped and the whole jog distance is executed.
+		// GRBL only answers "ok" to a $J line after it is in the JOG state, so every 0x85
+		// is re-sent after the "ok" of any $J line that was still in flight.
+
+		const double JogIncrementTime = 0.05;    // seconds of motion per $J increment
+		const double JogLeadTime = 0.30;         // seconds of motion kept queued in GRBL
+		const double JogHeartbeatTimeout = 0.25; // seconds without JogKeepAlive -> cancel
+		const double JogStartTimeout = 1.0;      // seconds a new jog may wait for GRBL to be Idle
+		const double JogStateMaxAge = 1.0;       // max age of the status report used to start a jog
+		const double JogResendTimeout = 2.0;     // give up waiting for in-flight $J lines after this
+
+		static readonly char[] StateTerminators = { '|', ':', ',', '>' };
+
+		// shared with the UI thread (under jogLock)
+		private readonly object jogLock = new object();
+		private int jogSession = 0;
+		private string jogAxis = null;           // "X", "X-", "Y", ... null = no jog requested
+		private double jogFeed;
+		private double jogMaxDistance;
+		private DateTime jogRequestTime;
+		private DateTime jogHeartbeat;
+		private volatile bool jogCancelRequested = false;
+		private volatile bool jogResetRequested = false;
+
+		// worker thread only
+		private int jogServedSession = 0;
+		private bool jogActive = false;
+		private string jogActiveAxis;
+		private double jogActiveFeed;
+		private double jogRemaining;
+		private DateTime jogQueuedUntil;
+		private string jogLastIncrement = null;
+		private bool jogIncrementInFlight = false;
+		private int jogIncrementCount = 0;
+		private int jogCancelResend = 0;         // $J lines in flight that need another 0x85 after their ok
+		private DateTime jogLastCancel = DateTime.MinValue;
+		private string rawState = "";            // state from the last status report, read by the worker
+		private DateTime rawStateTime = DateTime.MinValue;
+		#endregion Jogging
+
 		private void Work()
 		{
 			try
@@ -264,6 +313,13 @@ namespace OpenCNCPilot.Communication
 
 				bool SendMacroStatusReceived = false;
 
+				ResetJogWorkerState();
+				lock (jogLock)
+				{
+					jogAxis = null;
+					jogServedSession = jogSession;
+				}
+
 				writer.Write("\n$G\n");
 				writer.Write("\n$#\n");
 				writer.Flush();
@@ -284,6 +340,9 @@ namespace OpenCNCPilot.Communication
 							writer.Write((char)ToSendPriority.Dequeue());
 							writer.Flush();
 						}
+
+						JogService(writer, ControllerBufferSize);
+
 						if (Mode == OperatingMode.SendFile)
 						{
 							if (File.Count > FilePosition && (File[FilePosition].Length + 1) < (ControllerBufferSize - BufferState))
@@ -413,12 +472,16 @@ namespace OpenCNCPilot.Communication
 					{
 						if (Sent.Count != 0)
 						{
-							BufferState -= ((string)Sent.Dequeue()).Length + 1;
+							string okline = (string)Sent.Dequeue();
+							BufferState -= okline.Length + 1;
+							JogLineAcknowledged(writer, okline, false);
 						}
 						else
 						{
 							Console.WriteLine("Received OK without anything in the Sent Buffer");
 							BufferState = 0;
+							jogCancelResend = 0;
+							jogIncrementInFlight = false;
 						}
 					}
 					else
@@ -431,6 +494,7 @@ namespace OpenCNCPilot.Communication
 
 								RaiseEvent(ReportError, $"{line}: {errorline}");
 								BufferState -= errorline.Length + 1;
+								JogLineAcknowledged(writer, errorline, true);
 							}
 							else
 							{
@@ -438,12 +502,18 @@ namespace OpenCNCPilot.Communication
 									RaiseEvent(ReportError, $"Received <{line}> without anything in the Sent Buffer");
 
 								BufferState = 0;
+								jogCancelResend = 0;
+								jogIncrementInFlight = false;
 							}
 
 							Mode = OperatingMode.Manual;
 						}
 						else if (line.StartsWith("<"))
 						{
+							int stateEnd = line.IndexOfAny(StateTerminators, 1);
+							rawState = stateEnd > 1 ? line.Substring(1, stateEnd - 1) : line.Substring(1);
+							rawStateTime = DateTime.UtcNow;
+
 							RaiseEvent(ParseStatus, line);
 							SendMacroStatusReceived = true;
 						}
@@ -463,6 +533,7 @@ namespace OpenCNCPilot.Communication
 							Mode = OperatingMode.Manual;
 							ToSend.Clear();
 							ToSendMacro.Clear();
+							jogRemaining = 0;	// stop streaming jog increments
 						}
 						else if (line.StartsWith("grbl"))
 						{
@@ -649,6 +720,12 @@ namespace OpenCNCPilot.Communication
 
 			Mode = OperatingMode.Manual;
 
+			lock (jogLock)
+			{
+				jogAxis = null;
+			}
+			jogResetRequested = true;
+
 			ToSend.Clear();
 			ToSendPriority.Clear();
 			Sent.Clear();
@@ -716,6 +793,45 @@ namespace OpenCNCPilot.Communication
 			ToSendPriority.Enqueue('~');
 		}
 
+		/// <summary>
+		/// Starts a jog along one axis ("X", "X-", "Y", ... "Z-"). The machine only keeps moving
+		/// while JogKeepAlive() is called at least every JogHeartbeatTimeout seconds, and never
+		/// further than maxDistance in total.
+		/// </summary>
+		public void JogStart(string axis, double feed, double maxDistance)
+		{
+			if (!Connected)
+			{
+				RaiseEvent(Info, "Not Connected");
+				return;
+			}
+
+			if (Mode != OperatingMode.Manual || feed <= 0 || maxDistance <= 0)
+				return;
+
+			lock (jogLock)
+			{
+				jogSession++;
+				jogAxis = axis;
+				jogFeed = feed;
+				jogMaxDistance = maxDistance;
+				jogRequestTime = DateTime.UtcNow;
+				jogHeartbeat = jogRequestTime;
+			}
+		}
+
+		/// <summary>
+		/// Heartbeat for the jog started with JogStart(). Call it only while the jog key is really held.
+		/// </summary>
+		public void JogKeepAlive()
+		{
+			lock (jogLock)
+			{
+				if (jogAxis != null)
+					jogHeartbeat = DateTime.UtcNow;
+			}
+		}
+
 		public void JogCancel()
 		{
 			if (!Connected)
@@ -724,7 +840,215 @@ namespace OpenCNCPilot.Communication
 				return;
 			}
 
-			ToSendPriority.Enqueue((char)0x85);
+			lock (jogLock)
+			{
+				jogAxis = null;
+			}
+			jogCancelRequested = true;  // the worker drops queued $J lines and sends 0x85 (again after each in-flight $J is acknowledged)
+		}
+
+		// ---- jog handling, worker thread only ----
+
+		private void ResetJogWorkerState()
+		{
+			jogActive = false;
+			jogRemaining = 0;
+			jogIncrementInFlight = false;
+			jogLastIncrement = null;
+			jogCancelResend = 0;
+			jogLastCancel = DateTime.UtcNow;    // a new jog needs a status report newer than this
+			jogCancelRequested = false;
+			jogResetRequested = false;
+		}
+
+		private void JogService(StreamWriter writer, int controllerBufferSize)
+		{
+			if (!jogActive && !jogCancelRequested && !jogResetRequested && jogCancelResend == 0 && Volatile.Read(ref jogSession) == jogServedSession)
+				return;     // nothing to do (fast path, this runs on every loop iteration)
+
+			DateTime now = DateTime.UtcNow;
+
+			if (jogResetRequested)
+			{
+				ResetJogWorkerState();      // soft reset: GRBL has flushed everything itself
+				return;
+			}
+
+			if (jogCancelRequested)
+			{
+				jogCancelRequested = false;
+				CancelJog(writer, now);
+				return;
+			}
+
+			if (jogCancelResend > 0 && (now - jogLastCancel).TotalSeconds > JogResendTimeout)
+				jogCancelResend = 0;        // the acknowledgements never came (e.g. queues were cleared)
+
+			string axis;
+			double feed, maxDistance;
+			int session;
+			DateTime requested, heartbeat;
+
+			lock (jogLock)
+			{
+				axis = jogAxis;
+				feed = jogFeed;
+				maxDistance = jogMaxDistance;
+				session = jogSession;
+				requested = jogRequestTime;
+				heartbeat = jogHeartbeat;
+			}
+
+			bool alive = axis != null && (now - heartbeat).TotalSeconds < JogHeartbeatTimeout;
+
+			if (jogActive)
+			{
+				// dead-man: no heartbeat (key released, focus lost, UI frozen), another jog requested or a job started
+				if (!alive || session != jogServedSession || Mode != OperatingMode.Manual)
+				{
+					CancelJog(writer, now);
+					return;
+				}
+
+				if (jogRemaining <= 0 || jogIncrementInFlight)
+					return;     // max distance reached / wait for the previous increment to be accepted
+
+				if ((jogQueuedUntil - now).TotalSeconds > JogLeadTime)
+					return;     // enough motion queued in GRBL
+
+				SendJogIncrement(writer, controllerBufferSize, now);
+				return;
+			}
+
+			if (axis == null)
+			{
+				jogServedSession = session;     // the requested jog was already cancelled
+				return;
+			}
+
+			if (session == jogServedSession)
+				return;
+
+			// a new jog was requested
+			if (!alive || (now - requested).TotalSeconds > JogStartTimeout)
+			{
+				jogServedSession = session;     // key already released or GRBL never became Idle: drop it
+				return;
+			}
+
+			if (Mode != OperatingMode.Manual || jogCancelResend > 0 || BufferState > 0 || ToSend.Count > 0)
+				return;
+
+			// only start from a status report that says Idle and is newer than the last cancel
+			if (rawState != "Idle" || rawStateTime <= jogLastCancel || (now - rawStateTime).TotalSeconds > JogStateMaxAge)
+				return;
+
+			jogServedSession = session;
+			jogActive = true;
+			jogActiveAxis = axis;
+			jogActiveFeed = feed;
+			jogRemaining = maxDistance;
+			jogIncrementInFlight = false;
+			jogIncrementCount = 0;
+			jogQueuedUntil = now;
+
+			SendJogIncrement(writer, controllerBufferSize, now);
+		}
+
+		private void SendJogIncrement(StreamWriter writer, int controllerBufferSize, DateTime now)
+		{
+			double step = Math.Round(Math.Min(jogActiveFeed / 60.0 * JogIncrementTime, jogRemaining), 3);
+
+			if (step <= 0)
+			{
+				jogRemaining = 0;
+				return;
+			}
+
+			string line = string.Format(Constants.DecimalOutputFormat, "$J=G91F{0:0.#}{1}{2:0.###}", jogActiveFeed, jogActiveAxis, step);
+
+			if (line.Length + 1 >= controllerBufferSize - BufferState)
+				return;
+
+			writer.Write(line);
+			writer.Write('\n');
+			writer.Flush();
+
+			RecordLog("> " + line);
+
+			if (jogIncrementCount++ == 0)
+				RaiseEvent(LineSent, line);    // only show the first increment in the console
+
+			BufferState += line.Length + 1;
+			Sent.Enqueue(line);
+
+			jogLastIncrement = line;
+			jogIncrementInFlight = true;
+			jogRemaining -= step;
+
+			if (jogQueuedUntil < now)
+				jogQueuedUntil = now;
+			jogQueuedUntil += TimeSpan.FromSeconds(step / (jogActiveFeed / 60.0));
+		}
+
+		private void CancelJog(StreamWriter writer, DateTime now)
+		{
+			// $J lines that were never sent are simply dropped
+			lock (ToSend.SyncRoot)
+			{
+				if (ToSend.Count > 0)
+				{
+					object[] pending = ToSend.ToArray();
+					ToSend.Clear();
+
+					foreach (object o in pending)
+						if (!((string)o).Replace(" ", "").StartsWith("$J="))
+							ToSend.Enqueue(o);
+				}
+			}
+
+			writer.Write((char)0x85);
+			writer.Flush();
+			jogLastCancel = now;
+
+			// $J lines already sent but not yet acknowledged may still start moving after this 0x85
+			// (GRBL drops it while not in JOG state): send it again after each of their "ok"
+			int inFlight = 0;
+			foreach (object o in Sent.ToArray())
+				if (((string)o).StartsWith("$J="))
+					inFlight++;
+
+			jogCancelResend = inFlight;
+			jogActive = false;
+			jogRemaining = 0;
+		}
+
+		private void JogLineAcknowledged(StreamWriter writer, string line, bool error)
+		{
+			if (!line.StartsWith("$J="))
+				return;
+
+			if (ReferenceEquals(line, jogLastIncrement))
+			{
+				jogIncrementInFlight = false;
+
+				if (error)
+					jogRemaining = 0;   // e.g. error:15 (soft limit): stop streaming
+			}
+
+			if (jogCancelResend > 0)
+			{
+				jogCancelResend--;
+
+				if (!error)
+				{
+					// GRBL replies "ok" to a $J line only after it has entered the JOG state,
+					// so this cancel can no longer be ignored
+					writer.Write((char)0x85);
+					writer.Flush();
+					jogLastCancel = DateTime.UtcNow;
+				}
+			}
 		}
 
 		public void SetFile(IList<string> file)

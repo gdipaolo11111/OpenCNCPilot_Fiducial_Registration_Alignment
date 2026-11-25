@@ -1,10 +1,13 @@
 ﻿using OpenCNCPilot.Communication;
 using OpenCNCPilot.Util;
+using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace OpenCNCPilot
 {
@@ -138,9 +141,58 @@ namespace OpenCNCPilot
 
 		private void CheckBoxEnableJog_Unchecked(object sender, RoutedEventArgs e)
 		{
-			if (!machine.Connected)
+			StopKeyboardJog();
+		}
+
+		// ---- keyboard jogging ----
+		// The machine only moves while this timer confirms, every JogTimerInterval, that the jog key is
+		// physically held, the jog box has the focus and the window is active (see Machine.JogKeepAlive).
+		// A lost KeyUp, a focus change or a frozen UI therefore stops the jog within a fraction of a second.
+
+		private static readonly TimeSpan JogTimerInterval = TimeSpan.FromMilliseconds(40);
+
+		private DispatcherTimer jogTimer;
+		private Key jogKey = Key.None;
+
+		[DllImport("user32.dll")]
+		private static extern short GetAsyncKeyState(int vKey);
+
+		private static bool IsKeyPhysicallyDown(Key key)
+		{
+			int vk = KeyInterop.VirtualKeyFromKey(key);
+			return vk != 0 && (GetAsyncKeyState(vk) & 0x8000) != 0;
+		}
+
+		private void StopKeyboardJog()
+		{
+			jogKey = Key.None;
+
+			if (jogTimer != null)
+				jogTimer.Stop();
+
+			if (machine.Connected)
+				machine.JogCancel();
+		}
+
+		private void JogTimer_Tick(object sender, EventArgs e)
+		{
+			if (jogKey == Key.None)
+			{
+				jogTimer.Stop();
 				return;
-			machine.JogCancel();
+			}
+
+			bool held = IsKeyPhysicallyDown(jogKey)
+				&& IsActive
+				&& TextBoxJog.IsKeyboardFocused
+				&& CheckBoxEnableJog.IsChecked == true
+				&& machine.Connected
+				&& machine.Mode == Machine.OperatingMode.Manual;
+
+			if (held)
+				machine.JogKeepAlive();
+			else
+				StopKeyboardJog();
 		}
 
 		private void Jogging_KeyDown(object sender, KeyEventArgs e)
@@ -150,10 +202,10 @@ namespace OpenCNCPilot
 
 			if (e.Key == Key.Escape)
 			{
+				StopKeyboardJog();
+
 				if (Properties.Settings.Default.EnableEscapeSoftReset)
 					machine.SoftReset();
-				else
-					machine.JogCancel();
 			}
 
 			if (!CheckBoxEnableJog.IsChecked.Value)
@@ -163,6 +215,9 @@ namespace OpenCNCPilot
 
 			if (e.IsRepeat)
 				return;
+
+			if (jogKey != Key.None)
+				return;		// one jog at a time
 
 			if (machine.BufferState > 0 || machine.Status != "Idle")
 				return;
@@ -201,20 +256,32 @@ namespace OpenCNCPilot
 				distance = Properties.Settings.Default.JogDistanceCtrl;
 			}
 
-			if (direction != null)
+			if (direction == null)
+				return;
+
+			// JogDistance is now the maximum travel per key press; the jog itself is streamed in short
+			// increments and stops as soon as the key is released (or the heartbeat is lost)
+			jogKey = e.Key;
+			machine.JogStart(direction, feed, distance);
+
+			if (jogTimer == null)
 			{
-				machine.SendLine(string.Format(Constants.DecimalOutputFormat, "$J=G91F{0:0.#}{1}{2:0.###}", feed, direction, distance));
+				jogTimer = new DispatcherTimer(DispatcherPriority.Input);
+				jogTimer.Interval = JogTimerInterval;
+				jogTimer.Tick += JogTimer_Tick;
 			}
+
+			jogTimer.Start();
 		}
 
 		private void Jogging_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
 		{
-			machine.JogCancel();
+			StopKeyboardJog();
 		}
 
 		private void Jogging_KeyUp(object sender, KeyEventArgs e)
 		{
-			machine.JogCancel();
+			StopKeyboardJog();
 		}
 
 		private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)

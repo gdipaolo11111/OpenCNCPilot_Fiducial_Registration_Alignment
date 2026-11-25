@@ -488,6 +488,9 @@ namespace OpenCNCPilot
             if (videoSource == null)
                 return;
 
+            // Desconectamos el evento de los frames antes de parar
+            videoSource.NewFrame -= video_NewFrame;
+
             if (videoSource.IsRunning)
             {
                 // Le decimos a la cámara que pare
@@ -495,9 +498,9 @@ namespace OpenCNCPilot
                 // Esperamos a que se detenga físicamente (apaga el LED)
                 videoSource.WaitForStop();
             }
-            // Desconectamos el evento de los frames
-            videoSource.NewFrame -= new AForge.Video.NewFrameEventHandler(video_NewFrame);
+
             videoSource = null;
+            System.Threading.Interlocked.Exchange(ref cameraFramePending, 0);
             // Para que no se quede a la vista el último fotograma congelado
             CameraImage.Source = null;
         }
@@ -505,14 +508,12 @@ namespace OpenCNCPilot
         // Enciende la cámara elegida en el ComboBox, solo si el panel está abierto
         private void StartCamera()
         {
-            // 1. APAGAMOS LA CÁMARA ANTERIOR (si la hay)
             StopCamera();
 
-            // 2. ENCENDEMOS LA NUEVA
-            if (ExpanderCamera.IsExpanded && ComboBoxCameras.SelectedIndex >= 0 && videoDevices != null && videoDevices.Count > 0)
+            if (ExpanderCamera.IsExpanded && ComboBoxCameras.SelectedIndex >= 0 && videoDevices != null && ComboBoxCameras.SelectedIndex < videoDevices.Count)
             {
                 videoSource = new VideoCaptureDevice(videoDevices[ComboBoxCameras.SelectedIndex].MonikerString);
-                videoSource.NewFrame += new NewFrameEventHandler(video_NewFrame);
+                videoSource.NewFrame += video_NewFrame;
                 videoSource.Start();
             }
         }
@@ -520,76 +521,108 @@ namespace OpenCNCPilot
         // Evento al cambiar la cámara en el ComboBox
         private void ComboBoxCameras_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            StartCamera();
+            if (ExpanderCamera != null && ExpanderCamera.IsExpanded)
+                StartCamera();
+            else
+                StopCamera();
         }
 
         // Encender la cámara al abrir (expandir) el panel
         private void ExpanderCamera_Expanded(object sender, RoutedEventArgs e)
         {
-            StartCamera();
+            if (e.OriginalSource == sender)
+                StartCamera();
         }
 
         // Apagar la cámara al cerrar (colapsar) el panel
         private void ExpanderCamera_Collapsed(object sender, RoutedEventArgs e)
         {
-            StopCamera();
+            if (e.OriginalSource == sender)
+                StopCamera();
         }
 
+        // 1 mientras hay un fotograma esperando a pintarse en la UI
+        private int cameraFramePending = 0;
 
-        // Esta función se ejecuta por cada fotograma (frame) que manda la cámara
+        // Esta función se ejecuta por cada fotograma (frame) que manda la cámara (hilo de la cámara)
         private void video_NewFrame(object sender, NewFrameEventArgs eventArgs)
         {
+            // Si la UI todavía no ha pintado el fotograma anterior, este se descarta. Así la cámara
+            // nunca acumula trabajo en el hilo de la UI (eso retrasaba los eventos de teclado,
+            // incluido soltar la tecla de jog).
+            if (System.Threading.Interlocked.CompareExchange(ref cameraFramePending, 1, 0) != 0)
+                return;
+
+            Bitmap rotated = null;
+
             try
             {
-                // using: cada fotograma copiado se libera al terminar (si no, se acumula memoria a 30 fps)
-                using (Bitmap bitmap = (Bitmap)eventArgs.Frame.Clone())
+                // --- Rotar y Espejar ---
+                RotateFlipType transform = RotateFlipType.RotateNoneFlipNone;
+
+                if (!cameraMirrored)
                 {
-                    // --- INICIO NUEVO: Rotar y Espejar ---
-                    RotateFlipType transform = RotateFlipType.RotateNoneFlipNone;
-
-                    if (!cameraMirrored)
-                    {
-                        if (cameraRotation == 90) transform = RotateFlipType.Rotate90FlipNone;
-                        else if (cameraRotation == 180) transform = RotateFlipType.Rotate180FlipNone;
-                        else if (cameraRotation == 270) transform = RotateFlipType.Rotate270FlipNone;
-                    }
-                    else
-                    {
-                        if (cameraRotation == 0) transform = RotateFlipType.RotateNoneFlipX;
-                        else if (cameraRotation == 90) transform = RotateFlipType.Rotate90FlipX;
-                        else if (cameraRotation == 180) transform = RotateFlipType.Rotate180FlipX;
-                        else if (cameraRotation == 270) transform = RotateFlipType.Rotate270FlipX;
-                    }
-
-                    // Aplicamos la transformación a los píxeles si es necesario
-                    if (transform != RotateFlipType.RotateNoneFlipNone)
-                    {
-                        bitmap.RotateFlip(transform);
-                    }
-                    // --- FIN NUEVO ---
-
-                    // Convertir la imagen de la cámara a un formato que WPF pueda mostrar
-                    using (MemoryStream memory = new MemoryStream())
-                    {
-                        bitmap.Save(memory, System.Drawing.Imaging.ImageFormat.Bmp);
-                        memory.Position = 0;
-                        BitmapImage bitmapImage = new BitmapImage();
-                        bitmapImage.BeginInit();
-                        bitmapImage.StreamSource = memory;
-                        bitmapImage.CacheOption = BitmapCacheOption.OnLoad;
-                        bitmapImage.EndInit();
-                        bitmapImage.Freeze(); // Muy importante
-
-                        Dispatcher.BeginInvoke(new System.Action(delegate
-                        {
-                            // Si mientras tanto se ha apagado o cambiado la cámara, este fotograma ya no vale
-                            if (sender == videoSource)
-                                CameraImage.Source = bitmapImage;
-                        }));
-                    }
+                    if (cameraRotation == 90) transform = RotateFlipType.Rotate90FlipNone;
+                    else if (cameraRotation == 180) transform = RotateFlipType.Rotate180FlipNone;
+                    else if (cameraRotation == 270) transform = RotateFlipType.Rotate270FlipNone;
                 }
+                else
+                {
+                    if (cameraRotation == 0) transform = RotateFlipType.RotateNoneFlipX;
+                    else if (cameraRotation == 90) transform = RotateFlipType.Rotate90FlipX;
+                    else if (cameraRotation == 180) transform = RotateFlipType.Rotate180FlipX;
+                    else if (cameraRotation == 270) transform = RotateFlipType.Rotate270FlipX;
+                }
+
+                Bitmap source = eventArgs.Frame;
+
+                if (transform != RotateFlipType.RotateNoneFlipNone)
+                {
+                    // Solo se copia el fotograma si hay que girarlo; la copia se libera en el finally
+                    rotated = (Bitmap)source.Clone();
+                    rotated.RotateFlip(transform);
+                    source = rotated;
+                }
+
+                // Copia directa de píxeles a un BitmapSource (sin codificar/decodificar BMP)
+                BitmapSource frame = ToBitmapSource(source);
+
+                // Prioridad Background: por debajo de la entrada de teclado/ratón
+                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new System.Action(delegate
+                {
+                    // Si mientras tanto se ha apagado o cambiado la cámara, este fotograma ya no vale
+                    if (sender == videoSource)
+                        CameraImage.Source = frame;
+                    System.Threading.Interlocked.Exchange(ref cameraFramePending, 0);
+                }));
             }
-            catch { }
+            catch
+            {
+                System.Threading.Interlocked.Exchange(ref cameraFramePending, 0);
+            }
+            finally
+            {
+                if (rotated != null)
+                    rotated.Dispose();
+            }
+        }
+
+        private static BitmapSource ToBitmapSource(Bitmap bitmap)
+        {
+            var rect = new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height);
+            System.Drawing.Imaging.BitmapData data = bitmap.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+
+            try
+            {
+                BitmapSource source = BitmapSource.Create(bitmap.Width, bitmap.Height, 96, 96,
+                    System.Windows.Media.PixelFormats.Bgr24, null, data.Scan0, data.Stride * bitmap.Height, data.Stride);
+                source.Freeze(); // Muy importante: se crea en el hilo de la cámara
+                return source;
+            }
+            finally
+            {
+                bitmap.UnlockBits(data);
+            }
         }
 
         // Para leer la posición, la máquina tiene que estar conectada y sin nada en marcha
