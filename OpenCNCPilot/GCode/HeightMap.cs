@@ -76,8 +76,10 @@ namespace OpenCNCPilot.GCode
 
 		public double InterpolateZ(double x, double y)
 		{
-			if (x > Max.X || x < Min.X || y > Max.Y || y < Min.Y)
-				return MaxHeight;
+			// outside the probed area use the height of the nearest point on its edge
+			// (returning MaxHeight there made Z jump up at the edge, so tracks outside the area were not milled)
+			x = Math.Max(Min.X, Math.Min(Max.X, x));
+			y = Math.Max(Min.Y, Math.Min(Max.Y, y));
 
 			x -= Min.X;
 			y -= Min.Y;
@@ -85,11 +87,11 @@ namespace OpenCNCPilot.GCode
 			x /= GridX;
 			y /= GridY;
 
-			int iLX = (int)Math.Floor(x);   //lower integer part
-			int iLY = (int)Math.Floor(y);
+			int iLX = Math.Min((int)Math.Floor(x), SizeX - 2);  //lower integer part (the last cell includes the upper edge)
+			int iLY = Math.Min((int)Math.Floor(y), SizeY - 2);
 
-			int iHX = (int)Math.Ceiling(x); //upper integer part
-			int iHY = (int)Math.Ceiling(y);
+			int iHX = iLX + 1;              //upper integer part
+			int iHY = iLY + 1;
 
 			double fX = x - iLX;             //fractional part
 			double fY = y - iLY;

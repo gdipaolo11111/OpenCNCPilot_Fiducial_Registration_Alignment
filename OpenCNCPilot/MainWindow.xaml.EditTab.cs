@@ -33,6 +33,20 @@ namespace OpenCNCPilot
 				return;
 			}
 
+			// how far the cutting moves go outside the probed area (there the height of the nearest edge is used)
+			double outside = Math.Max(
+				Math.Max(Map.Min.X - ToolPath.MinFeed.X, ToolPath.MaxFeed.X - Map.Max.X),
+				Math.Max(Map.Min.Y - ToolPath.MinFeed.Y, ToolPath.MaxFeed.Y - Map.Max.Y));
+
+			if (
+				outside > 0.01 &&
+				MessageBox.Show($"The toolpath goes up to {outside:0.##} mm outside the probed area.\n\nOutside the area, the height of the nearest edge of the height map will be used. Apply the height map anyway?",
+					"Toolpath outside the height map", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes
+				)
+			{
+				return;
+			}
+
 			try
 			{
 				machine.SetFile(ToolPath.ApplyHeightMap(Map).GetGCode());
