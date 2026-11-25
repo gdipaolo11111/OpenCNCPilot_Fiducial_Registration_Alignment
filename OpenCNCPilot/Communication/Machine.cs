@@ -547,7 +547,9 @@ namespace OpenCNCPilot.Communication
 			}
 			catch (Exception ex)
 			{
-				RaiseEvent(ReportError, $"Fatal Error in Work Loop: {ex.Message}");
+				// lineTask.Result wraps the real error (e.g. an IOException from the serial port) in an AggregateException
+				Exception error = ex is AggregateException ? ex.GetBaseException() : ex;
+				RaiseEvent(ReportError, $"Fatal Error in Work Loop: {error.GetType().Name}: {error.Message}");
 				RaiseEvent(() => Disconnect());
 			}
 		}
