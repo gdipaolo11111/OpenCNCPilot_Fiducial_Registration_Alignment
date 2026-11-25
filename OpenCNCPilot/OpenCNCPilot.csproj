@@ -99,6 +99,9 @@
     <Compile Include="EnterNumberWindow.xaml.cs">
       <DependentUpon>EnterNumberWindow.xaml</DependentUpon>
     </Compile>
+    <Compile Include="EnterPointWindow.xaml.cs">
+      <DependentUpon>EnterPointWindow.xaml</DependentUpon>
+    </Compile>
     <Compile Include="GCode\GCodeCommands\Arc.cs" />
     <Compile Include="GCode\GCodeCommands\Command.cs" />
     <Compile Include="GCode\GCodeCommands\Line.cs" />
@@ -160,6 +163,10 @@
       <Generator>MSBuild:Compile</Generator>
     </Page>
     <Page Include="EnterNumberWindow.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+    <Page Include="EnterPointWindow.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
     </Page>

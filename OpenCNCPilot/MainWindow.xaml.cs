@@ -690,21 +690,18 @@ namespace OpenCNCPilot
         {
             point = defaultValue;
 
-            EnterNumberWindow enwX = new EnterNumberWindow(defaultValue.X);
-            enwX.Title = $"{pointName}: Theoretical X coordinate (G-Code)";
-            enwX.Owner = this;
-            enwX.ShowDialog();
-            if (!enwX.Ok)
+            // X e Y en una sola casilla separadas por ';' (así la coma puede ser el separador decimal)
+            EnterPointWindow enw = new EnterPointWindow(
+                $"Coordinates of {pointName} in the G-Code file (its position in your design), as X;Y\n\n" +
+                "Example: -35,524;0   (decimals with comma or point)",
+                defaultValue);
+            enw.Title = $"{pointName}: G-Code coordinates";
+            enw.Owner = this;
+            enw.ShowDialog();
+            if (!enw.Ok)
                 return false;
 
-            EnterNumberWindow enwY = new EnterNumberWindow(defaultValue.Y);
-            enwY.Title = $"{pointName}: Theoretical Y coordinate (G-Code)";
-            enwY.Owner = this;
-            enwY.ShowDialog();
-            if (!enwY.Ok)
-                return false;
-
-            point = new Vector2(enwX.Value, enwY.Value);
+            point = enw.Value;
             return true;
         }
 
@@ -796,7 +793,13 @@ namespace OpenCNCPilot
             // Con los puntos muy juntos el ángulo no es fiable (y si coinciden, la escala dividiría entre cero)
             if (deltaGCode.Magnitude < 1 || deltaWork.Magnitude < 1)
             {
-                MessageBox.Show("Point 1 and Point 2 are too close together. Use two points as far apart as possible.");
+                // Se muestran los valores para ver cuál falla (p. ej. coordenadas del G-Code dejadas en 0 en los dos puntos)
+                MessageBox.Show(
+                    "Point 1 and Point 2 are too close together (less than 1 mm) " +
+                    (deltaGCode.Magnitude < 1 ? "in the G-Code coordinates you entered" : "in the measured positions") + ".\n\n" +
+                    $"Point 1: G-Code X={p1GCode.X:F3} Y={p1GCode.Y:F3}   measured X={p1Work.X:F3} Y={p1Work.Y:F3}\n" +
+                    $"Point 2: G-Code X={p2GCode.X:F3} Y={p2GCode.Y:F3}   measured X={p2Work.X:F3} Y={p2Work.Y:F3}\n\n" +
+                    "Use two points as far apart as possible, and enter for each one its coordinates in the G-Code file.");
                 return;
             }
 

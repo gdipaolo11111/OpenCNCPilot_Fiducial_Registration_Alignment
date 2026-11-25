@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -29,12 +30,42 @@ namespace OpenCNCPilot
 
 		private void buttonOk_Click(object sender, RoutedEventArgs e)
 		{
+			if (!ReadValue())
+				return;
+
 			Ok = true;
 
 			if (User_Ok != null)
 				User_Ok.Invoke(Value);
 
 			Close();
+		}
+
+		/// <summary>
+		/// Parses a number typed by the user, accepting both '.' and ',' as decimal separator
+		/// (parsing it as en-US, like the binding did, turned "12,5" into 125)
+		/// </summary>
+		internal static bool TryParseNumber(string text, out double value)
+		{
+			return double.TryParse(text.Trim().Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+		}
+
+		/// <summary>
+		/// Reads the number from the text box. Returns false if it isn't a number.
+		/// </summary>
+		private bool ReadValue()
+		{
+			double value;
+			if (!TryParseNumber(textBox.Text, out value))
+			{
+				MessageBox.Show(this, $"\"{textBox.Text}\" is not a valid number.");
+				textBox.Focus();
+				textBox.SelectAll();
+				return false;
+			}
+
+			Value = value;
+			return true;
 		}
 
 		private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
@@ -48,7 +79,6 @@ namespace OpenCNCPilot
 			if (e.Key == Key.Enter)
 			{
 				e.Handled = true;
-				((TextBox)sender).GetBindingExpression(TextBox.TextProperty).UpdateSource();
 				buttonOk_Click(null, null);
 			}
 			else if (e.Key == Key.Escape)
