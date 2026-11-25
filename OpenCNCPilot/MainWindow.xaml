@@ -49,6 +49,8 @@
                     </StackPanel>
                 </StackPanel>
             </Border>
+            <!-- the left column scrolls when its panels don't fit in the window (e.g. with Camera Alignment open) -->
+            <ScrollViewer HorizontalAlignment="Left" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel Orientation="Vertical" HorizontalAlignment="Left">
                 <Border Style="{StaticResource stylePanelOut}">
                     <Expander Header="File" Width="Auto" IsExpanded="{util:SettingBinding FileExpanderOpen}">
@@ -309,6 +311,7 @@
                     </Expander>
                 </Border>
             </StackPanel>
+            </ScrollViewer>
 
             <StackPanel Orientation="Vertical" HorizontalAlignment="Right" FlowDirection="RightToLeft">
                 <Border Style="{StaticResource stylePanelOut}">

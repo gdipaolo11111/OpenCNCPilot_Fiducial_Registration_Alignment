@@ -754,5 +754,17 @@ namespace OpenCNCPilot.Properties {
                 this["CameraOffsetY"] = value;
             }
         }
+
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("")]
+        public string CameraName {
+            get {
+                return ((string)(this["CameraName"]));
+            }
+            set {
+                this["CameraName"] = value;
+            }
+        }
     }
 }

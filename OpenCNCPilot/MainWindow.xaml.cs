@@ -38,6 +38,8 @@ namespace OpenCNCPilot
 
         private int cameraRotation = Properties.Settings.Default.CameraRotation;
         private bool cameraMirrored = Properties.Settings.Default.CameraMirrored;
+        // false mientras se rellena la lista de cámaras al arrancar
+        private bool camerasListed = false;
 
         Machine machine = new Machine();
 
@@ -75,8 +77,11 @@ namespace OpenCNCPilot
             }
             if (ComboBoxCameras.Items.Count > 0)
             {
-                ComboBoxCameras.SelectedIndex = 0; // Seleccionar la primera cámara por defecto
+                // La última cámara elegida; si no está conectada, la primera
+                int savedCamera = ComboBoxCameras.Items.IndexOf(Properties.Settings.Default.CameraName);
+                ComboBoxCameras.SelectedIndex = savedCamera >= 0 ? savedCamera : 0;
             }
+            camerasListed = true;
             // --- FIN: Buscar cámaras ---
 
             // --- INICIO: Apagar cámara al cerrar la ventana ---
@@ -521,6 +526,11 @@ namespace OpenCNCPilot
         // Evento al cambiar la cámara en el ComboBox
         private void ComboBoxCameras_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
+            // Solo se recuerda la cámara elegida a mano, no la que se elige sola al arrancar
+            // (si la guardada no está conectada, no se pierde)
+            if (camerasListed && ComboBoxCameras.SelectedItem != null)
+                Properties.Settings.Default.CameraName = (string)ComboBoxCameras.SelectedItem;
+
             if (ExpanderCamera != null && ExpanderCamera.IsExpanded)
                 StartCamera();
             else
@@ -530,8 +540,13 @@ namespace OpenCNCPilot
         // Encender la cámara al abrir (expandir) el panel
         private void ExpanderCamera_Expanded(object sender, RoutedEventArgs e)
         {
-            if (e.OriginalSource == sender)
-                StartCamera();
+            if (e.OriginalSource != sender)
+                return;
+
+            StartCamera();
+
+            // Desplazar la columna izquierda para que se vea el panel recién abierto
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new System.Action(() => ExpanderCamera.BringIntoView()));
         }
 
         // Apagar la cámara al cerrar (colapsar) el panel
