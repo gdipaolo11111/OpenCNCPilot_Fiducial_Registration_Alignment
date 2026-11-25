@@ -1,4 +1,6 @@
 ﻿using System;
+using System.IO.Ports;
+using System.Linq;
 using System.Windows;
 
 namespace OpenCNCPilot
@@ -16,6 +18,9 @@ namespace OpenCNCPilot
 
 		private void ButtonConnect_Click(object sender, RoutedEventArgs e)
 		{
+			if (Properties.Settings.Default.ConnectionType == Communication.ConnectionType.Serial && !SelectSerialPort())
+				return;
+
 			try
 			{
 				machine.Connect();
@@ -24,6 +29,33 @@ namespace OpenCNCPilot
 			{
 				MessageBox.Show(ex.Message);
 			}
+		}
+
+		/// <summary>
+		/// If no serial port is selected (or the selected one no longer exists) and only one is available, selects that one.
+		/// Returns false if there is no usable port.
+		/// </summary>
+		private bool SelectSerialPort()
+		{
+			string[] ports = SerialPort.GetPortNames().Distinct().ToArray();
+			string selected = Properties.Settings.Default.SerialPortName;
+
+			if (!string.IsNullOrEmpty(selected) && ports.Contains(selected))
+				return true;
+
+			if (ports.Length == 1)
+			{
+				Properties.Settings.Default.SerialPortName = ports[0];
+				Machine_Info($"Serial port {ports[0]} selected (the only one available)");
+				return true;
+			}
+
+			if (ports.Length == 0)
+				MessageBox.Show("No serial port found. Is the machine plugged in?");
+			else
+				MessageBox.Show($"Select the serial port in the settings, there are several available: {string.Join(", ", ports)}");
+
+			return false;
 		}
 
 		private void ButtonDisconnect_Click(object sender, RoutedEventArgs e)
